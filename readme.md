@@ -496,8 +496,3 @@ for worker in worker-1 worker-2 worker-3; do
 done
 ```
 
----
-
-## Next: Script 19 - Keepalived + HAProxy
-
-Proceed to `19-install-keepalived-haproxy.md`
