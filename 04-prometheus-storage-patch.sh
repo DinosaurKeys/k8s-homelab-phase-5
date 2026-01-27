@@ -9,6 +9,10 @@ metadata:
   name: k8s
   namespace: monitoring
 spec:
+  podMetadata:
+    labels:
+      app.kubernetes.io/component: prometheus
+      app.kubernetes.io/part-of: kube-prometheus
   storage:
     volumeClaimTemplate:
       spec:
@@ -29,5 +33,3 @@ spec:
     runAsNonRoot: true
     runAsUser: 1000
 EOF
-
-echo "Created prometheus-storage-patch.yaml"
