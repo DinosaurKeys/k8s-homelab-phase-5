@@ -102,25 +102,21 @@ kubectl wait \
 
 ---
 
-
 Without fsGroup:
-┌─────────────────────────────────┐
-│ /prometheus volume              │
-│ Owner: root:root (0:0)          │
-│ Prometheus user: 1000           │
-│ Result: PERMISSION DENIED       │
-└─────────────────────────────────┘
+
+/prometheus volume
+Owner: root:root (0:0)
+Prometheus user: 1000 
+Result: PERMISSION DENIED
 
 With fsGroup: 2000:
-┌─────────────────────────────────┐
-│ /prometheus volume              │
-│ Owner: root:2000                │
-│ Prometheus user: 1000           │
-│ Prometheus group: 2000          │
-│ Result: CAN WRITE ✓             │
-└─────────────────────────────────┘
 
 
+/prometheus volume   
+Owner: root:2000
+Prometheus user: 1000
+Prometheus group: 2000
+Result: CAN WRITE ✓ 
 
 ## Script 04: Create Prometheus Storage Patch
 
@@ -230,10 +226,6 @@ echo "Created grafana-pvc.yaml"
 echo "=== Removing NetworkPolicies (homelab simplification) ==="
 kubectl -n monitoring delete networkpolicy --all
 echo "NetworkPolicies removed"
-
-
-
-
 
 
 ## Script 06: Apply Monitoring Stack
