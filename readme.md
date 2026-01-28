@@ -1,8 +1,13 @@
-# Install Prometheus and Grafana (No Helm)
+# Install Prometheus + Grafana
 
-## What You're Building
+This installs the upstream **kube-prometheus** stack (Prometheus, Alertmanager, Grafana, exporters) using raw manifests — no Helm.
 
-```
+## What you're building
+
+<details>
+<summary>Architecture diagram (click to expand)</summary>
+
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    MONITORING STACK ARCHITECTURE                            │
 │                                                                             │
@@ -25,7 +30,7 @@
 │  │                        PROMETHEUS                                   │   │
 │  │                                                                      │   │
 │  │   - Scrapes /metrics endpoints every 30s                            │   │
-│  │   - Stores time-series data in Longhorn PVC                        │   │
+│  │   - Stores time-series data in Longhorn PVC                         │   │
 │  │   - Evaluates alerting rules                                        │   │
 │  │   - Exposes PromQL query interface                                  │   │
 │  │                                                                      │   │
@@ -34,17 +39,28 @@
 │                    ┌────────────────┼────────────────┐                     │
 │                    ▼                ▼                ▼                     │
 │  ┌──────────────────────┐  ┌──────────────────┐  ┌──────────────────┐     │
-│  │    GRAFANA           │  │  ALERTMANAGER    │  │  PROMETHEUS UI   │     │
+│  │    GRAFANA           │  │  ALERTMANAGER    │  │  PROMETHEUS UI    │     │
 │  │                      │  │                  │  │                  │     │
-│  │ - Visualizations     │  │ - Routes alerts  │  │ - PromQL queries │     │
-│  │ - Dashboards         │  │ - Deduplication  │  │ - Target status  │     │
-│  │ - Alerts overview    │  │ - Email/Slack    │  │ - Config view    │     │
+│  │ - Visualizations     │  │ - Routes alerts  │  │ - PromQL queries  │     │
+│  │ - Dashboards         │  │ - Deduplication  │  │ - Target status   │     │
+│  │ - Alerts overview    │  │ - Email/Slack    │  │ - Config view     │     │
 │  │                      │  │                  │  │                  │     │
-│  │ grafana.local        │  │                  │  │ prometheus.local │     │
+│  │ grafana.local        │  │                  │  │ prometheus.local  │     │
 │  └──────────────────────┘  └──────────────────┘  └──────────────────┘     │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+</details>
+
+---
+
+## Prereqs
+
+- Kubernetes cluster is working (`kubectl get nodes`)
+- Longhorn installed (for PVCs)
+- Ingress-NGINX installed (Ingress controller)
+- cert-manager + issuer named `homelab-ca-issuer` (only needed for TLS Ingress examples)
 
 ---
 
@@ -54,27 +70,27 @@
 
 ```bash
 #!/bin/bash
+set -e
 
 mkdir -p manifests/prometheus
-git clone --depth 1 --branch v0.13.0 \
-  https://github.com/prometheus-operator/kube-prometheus.git \
-  manifests/prometheus
+git clone --depth 1 --branch v0.13.0   https://github.com/prometheus-operator/kube-prometheus.git   manifests/prometheus
 ```
 
 ---
 
-## Script 02: Review Manifests
+## Script 02: Review manifests
 
-`02-Review-Manifest.sh`:
+`02-review-manifests.sh`:
 
 ```bash
 #!/bin/bash
+set -e
 
 echo "=== Manifest directories ==="
 ls manifests/prometheus/manifests/
 
 echo ""
-echo "=== Setup manifests (CRDs) ==="
+echo "=== Setup manifests (CRDs, namespace) ==="
 ls manifests/prometheus/manifests/setup/
 ```
 
@@ -82,48 +98,42 @@ ls manifests/prometheus/manifests/setup/
 
 ## Script 03: Apply CRDs
 
-`03-Apply-CRDs.sh`:
+`03-apply-crds.sh`:
 
 ```bash
 #!/bin/bash
+set -e
 
-# Apply CRDs and namespace first
-echo "=== Applying CRDs and namespace ==="
+echo "=== Applying CRDs + namespace (server-side) ==="
 kubectl apply --server-side -f manifests/prometheus/manifests/setup/
 
-# Wait for CRDs to be established
-echo "=== Waiting for CRDs ==="
-kubectl wait \
-  --for condition=Established \
-  --all CustomResourceDefinition \
-  --namespace=monitoring \
-  --timeout=120s
+echo ""
+echo "=== Waiting for CRDs to be Established ==="
+kubectl wait   --for=condition=Established   --all CustomResourceDefinition   --timeout=120s
 ```
 
 ---
 
-Without fsGroup:
+## Why `fsGroup` matters (Prometheus + PVC)
 
-/prometheus volume
-Owner: root:root (0:0)
-Prometheus user: 1000 
-Result: PERMISSION DENIED
+Prometheus runs as a non-root user. If the volume is mounted as `root:root`, Prometheus can't write.
 
-With fsGroup: 2000:
+| Setting | Volume owner | Prometheus can write? |
+|---|---|---|
+| **No `fsGroup`** | `root:root (0:0)` | ❌ Permission denied |
+| **With `fsGroup: 2000`** | `root:2000` | ✅ Works |
 
+---
 
-/prometheus volume   
-Owner: root:2000
-Prometheus user: 1000
-Prometheus group: 2000
-Result: CAN WRITE ✓ 
+## Script 04: Create Prometheus storage patch (Longhorn + fsGroup)
 
-## Script 04: Create Prometheus Storage Patch
+`04-prometheus-storage-patch.sh` (creates `prometheus-storage-patch.yaml`):
 
-`04-prometheus-storage-patch.sh`:
-
+```bash
 #!/bin/bash
-kubectl apply -f - <<'EOF'
+set -e
+
+cat > prometheus-storage-patch.yaml <<'EOF'
 apiVersion: monitoring.coreos.com/v1
 kind: Prometheus
 metadata:
@@ -136,30 +146,27 @@ metadata:
     app.kubernetes.io/part-of: kube-prometheus
     app.kubernetes.io/version: 2.45.0
 spec:
-  # THIS IS WHAT WAS MISSING - tells Prometheus to watch ALL ServiceMonitors
+  # Watch ALL ServiceMonitors/PodMonitors (useful for homelab)
   serviceMonitorSelector: {}
   serviceMonitorNamespaceSelector: {}
   podMonitorSelector: {}
   podMonitorNamespaceSelector: {}
 
-  # Pod labels for service discovery
   podMetadata:
     labels:
       app.kubernetes.io/component: prometheus
       app.kubernetes.io/part-of: kube-prometheus
 
-  # Storage on Longhorn
   storage:
     volumeClaimTemplate:
       spec:
         storageClassName: longhorn
         accessModes:
-        - ReadWriteOnce
+          - ReadWriteOnce
         resources:
           requests:
             storage: 20Gi
 
-  # Other settings
   retention: 15d
   replicas: 1
 
@@ -174,29 +181,30 @@ spec:
     runAsNonRoot: true
     runAsUser: 1000
 
-  # Required references
   alerting:
     alertmanagers:
-    - namespace: monitoring
-      name: alertmanager-main
-      port: web
+      - namespace: monitoring
+        name: alertmanager-main
+        port: web
 
   serviceAccountName: prometheus-k8s
   ruleSelector: {}
   ruleNamespaceSelector: {}
 EOF
 
+echo "Created prometheus-storage-patch.yaml"
+```
 
 ---
 
-## Script 05: Create Grafana PVC (CORRECTED)
+## Script 05: Create Grafana PVC
 
-`05-grafana-pvc.sh`:
+`05-grafana-pvc.sh` (creates `grafana-pvc.yaml`):
 
 ```bash
 #!/bin/bash
+set -e
 
-# Create ONLY the PVC file (NOT a partial Deployment - that doesn't work!)
 cat > grafana-pvc.yaml <<'EOF'
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -215,42 +223,50 @@ EOF
 echo "Created grafana-pvc.yaml"
 ```
 
-**Why this is different:** You cannot apply a partial Deployment (missing selector, labels, image). Instead, we create just the PVC, then use `kubectl patch` to modify the existing Deployment.
-
+> Note: Don’t try to `kubectl apply` a “partial Deployment” to add storage — it fails because required fields (selector, labels, image, etc.) are missing. Create the PVC, then **patch** the existing Deployment.
 
 ---
 
-##REMOVE all Policy
+## Optional: Remove NetworkPolicies (homelab simplification)
 
-#!/bin/bash
-echo "=== Removing NetworkPolicies (homelab simplification) ==="
-kubectl -n monitoring delete networkpolicy --all
-echo "NetworkPolicies removed"
-
-
-## Script 06: Apply Monitoring Stack
-
-`06-apply-monitoring-manifest.sh`:
+`remove-networkpolicies.sh`:
 
 ```bash
 #!/bin/bash
+set -e
 
-echo "=== Applying monitoring stack (main manifests) ==="
+echo "=== Removing NetworkPolicies (monitoring namespace) ==="
+kubectl -n monitoring delete networkpolicy --all
+echo "NetworkPolicies removed"
+```
+
+---
+
+## Script 06: Apply monitoring stack
+
+`06-apply-monitoring-manifests.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "=== Applying kube-prometheus main manifests ==="
 kubectl apply -f manifests/prometheus/manifests/
 
 echo ""
-echo "=== Waiting for base deployment (60 seconds) ==="
+echo "=== Waiting 60 seconds for pods to start ==="
 sleep 60
 ```
 
 ---
 
-## Script 07: Apply Storage Patches (CORRECTED)
+## Script 07: Apply storage patches
 
 `07-apply-storage-patches.sh`:
 
 ```bash
 #!/bin/bash
+set -e
 
 echo "=== Applying Prometheus storage patch ==="
 kubectl apply -f prometheus-storage-patch.yaml
@@ -264,8 +280,7 @@ echo "=== Waiting for Grafana PVC to bind ==="
 kubectl -n monitoring wait --for=jsonpath='{.status.phase}'=Bound pvc/grafana-storage --timeout=120s
 
 echo ""
-echo "=== Patching Grafana Deployment to use PVC ==="
-# This patches the EXISTING Grafana deployment to use our PVC
+echo "=== Patching Grafana Deployment to use the PVC ==="
 kubectl -n monitoring patch deployment grafana --type='json' -p='[
   {
     "op": "replace",
@@ -283,23 +298,18 @@ kubectl -n monitoring patch deployment grafana --type='json' -p='[
 
 echo ""
 echo "=== Storage patches applied ==="
-echo "Grafana will restart with persistent storage"
+echo "Grafana will restart with persistent storage."
 ```
-
-**What this does:**
-1. Applies Prometheus storage (this merges with existing Prometheus CR)
-2. Creates Grafana PVC
-3. Waits for PVC to bind (Longhorn creates the volume)
-4. Patches the EXISTING Grafana Deployment to use the PVC
 
 ---
 
-## Script 08: Wait for Pods
+## Script 08: Wait for pods
 
 `08-wait-for-pods.sh`:
 
 ```bash
 #!/bin/bash
+set -e
 
 echo "=== Waiting for monitoring pods (3-5 minutes) ==="
 echo "Checking every 30 seconds..."
@@ -308,27 +318,28 @@ while true; do
   NOT_READY=$(kubectl get pods -n monitoring --no-headers 2>/dev/null | grep -v "Running\|Completed" | wc -l)
   TOTAL=$(kubectl get pods -n monitoring --no-headers 2>/dev/null | wc -l)
   RUNNING=$(kubectl get pods -n monitoring --no-headers 2>/dev/null | grep "Running" | wc -l)
-  
+
   echo "$(date +%H:%M:%S) - Running: $RUNNING | Not Ready: $NOT_READY | Total: $TOTAL"
-  
+
   if [ "$NOT_READY" -eq 0 ] && [ "$TOTAL" -gt 10 ]; then
     echo ""
     echo "All pods ready!"
     break
   fi
-  
+
   sleep 30
 done
 ```
 
 ---
 
-## Script 09: Create Ingresses
+## Script 09: Create Ingresses (TLS)
 
 `09-create-ingresses.sh`:
 
 ```bash
 #!/bin/bash
+set -e
 
 echo "=== Creating Grafana Ingress ==="
 kubectl apply -f - <<'EOF'
@@ -342,20 +353,20 @@ metadata:
 spec:
   ingressClassName: nginx
   tls:
-  - hosts:
-    - grafana.local
-    secretName: grafana-tls
+    - hosts:
+        - grafana.local
+      secretName: grafana-tls
   rules:
-  - host: grafana.local
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: grafana
-            port:
-              number: 3000
+    - host: grafana.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
 EOF
 
 echo ""
@@ -371,20 +382,20 @@ metadata:
 spec:
   ingressClassName: nginx
   tls:
-  - hosts:
-    - prometheus.local
-    secretName: prometheus-tls
+    - hosts:
+        - prometheus.local
+      secretName: prometheus-tls
   rules:
-  - host: prometheus.local
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: prometheus-k8s
-            port:
-              number: 9090
+    - host: prometheus.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus-k8s
+                port:
+                  number: 9090
 EOF
 
 echo ""
@@ -394,12 +405,13 @@ kubectl get ingress -n monitoring
 
 ---
 
-## Script 10: Verify Installation
+## Script 10: Verify installation
 
 `10-verify-installation.sh`:
 
 ```bash
 #!/bin/bash
+set -e
 
 echo "=== Prometheus pods ==="
 kubectl get pods -n monitoring -l app.kubernetes.io/name=prometheus
@@ -409,7 +421,7 @@ echo "=== Grafana pod ==="
 kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana
 
 echo ""
-echo "=== AlertManager pods ==="
+echo "=== Alertmanager pods ==="
 kubectl get pods -n monitoring -l app.kubernetes.io/name=alertmanager
 
 echo ""
@@ -438,50 +450,19 @@ echo "============================================"
 
 ---
 
-## Access Services
+## Access services
 
-Add to your laptop's `/etc/hosts`:
-```
+Add to your laptop `/etc/hosts`:
+
+```text
 192.168.0.240  grafana.local prometheus.local
 ```
 
-**Default Grafana credentials:**
-- URL: https://grafana.local
+Default Grafana credentials:
+
+- URL: `https://grafana.local`
 - Username: `admin`
 - Password: `admin`
-
----
-
-## What Was Wrong With Your Original Script 05
-
-```
-YOUR ORIGINAL 05-grafana-storage-patch.sh:
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ apiVersion: apps/v1                                                         │
-│ kind: Deployment            ← This is a PARTIAL Deployment                  │
-│ metadata:                                                                   │
-│   name: grafana                                                             │
-│ spec:                                                                       │
-│   template:                 ← Missing: selector, labels                     │
-│     spec:                                                                   │
-│       containers:                                                           │
-│       - name: grafana       ← Missing: image (REQUIRED!)                    │
-│                                                                             │
-│ ERROR: "spec.selector: Required value"                                      │
-│ ERROR: "spec.template.spec.containers[0].image: Required value"             │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-CORRECTED APPROACH:
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 1. Create just the PVC (complete resource, works fine)                     │
-│ 2. Apply main manifests (creates Grafana Deployment)                       │
-│ 3. Use kubectl patch to MODIFY the existing Deployment                     │
-│                                                                             │
-│ kubectl patch deployment grafana --type='json' -p='[...]'                  │
-│                                                                             │
-│ This MODIFIES the existing Deployment, keeping all its fields intact       │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
 
 ---
 
@@ -490,36 +471,28 @@ CORRECTED APPROACH:
 ### Grafana PVC stuck in Pending?
 
 ```bash
-# Check PVC status
 kubectl describe pvc grafana-storage -n monitoring
-
-# Check Longhorn
 kubectl get volumes.longhorn.io -n longhorn-system
 ```
 
 ### Grafana pod crashing after patch?
 
 ```bash
-# Check pod logs
 kubectl logs -n monitoring -l app.kubernetes.io/name=grafana --tail=50
-
-# Check if volume is mounted correctly
 kubectl describe pod -n monitoring -l app.kubernetes.io/name=grafana | grep -A10 "Volumes:"
 ```
 
 ### Prometheus not scraping targets?
 
 ```bash
-# Check service monitors
 kubectl get servicemonitors -n monitoring
-
-# Check Prometheus targets in UI
-# https://prometheus.local → Status → Targets
 ```
+
+Prometheus UI: `https://prometheus.local` → **Status → Targets**
 
 ---
 
-## Verify Storage is on Dedicated Disk
+## Verify storage is on the dedicated Longhorn disk
 
 ```bash
 echo "=== Checking Longhorn volumes ==="
@@ -532,4 +505,3 @@ for worker in worker-1 worker-2 worker-3; do
   ssh $worker "du -sh /mnt/longhorn/replicas/ 2>/dev/null"
 done
 ```
-
